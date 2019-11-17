@@ -6,11 +6,21 @@ verify_ssl = true
 [dev-packages]
 
 [packages]
-tensorflow-gpu = "*"
-gym = "*"
+tensorflow-gpu = "<1.14"
+gym = {extras = ["atari"],version = "*"}
 vizdoomgym = {git = "https://github.com/alex-petrenko/vizdoomgym",editable = true}
 colorlog = "*"
 opencv-python = "*"
+vizdoom = {git = "https://github.com/mwydmuch/ViZDoom"}
+numpy = "<1.16"  # numpy 1.16.0 is known for memory leaks! https://github.com/numpy/numpy/issues/12793 (also with multiprocessing JoinableQueues)
+networkx = "*"
+bokeh = "*"
+psutil = "*"
+pillow = "*"
+matplotlib = "<=3.0.3"  # 3.1 breaks nx graph plots
+ipdb = "*"
+pyyaml = ">=4.2b1"
+keras = "*"
 
 [requires]
 python_version = "3.6"

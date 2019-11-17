@@ -2,41 +2,53 @@ import gc
 import os
 import shutil
 import time
+from os.path import join
 from unittest import TestCase
 
 import numpy as np
 import tensorflow as tf
 
+from algorithms.agent import TrainStatus
 from algorithms.baselines.ppo.agent_ppo import AgentPPO, PPOBuffer, ActorCritic
 from algorithms.baselines.ppo.enjoy_ppo import enjoy
 from algorithms.baselines.ppo.ppo_utils import parse_args_ppo
 from algorithms.baselines.ppo.train_ppo import train
 from algorithms.tests.test_wrappers import TEST_ENV_NAME
-from algorithms.tf_utils import placeholder_from_space, placeholders
-from utils.doom.doom_utils import make_doom_env, env_by_name
-from utils.utils import log, AttrDict
+from algorithms.utils.tf_utils import placeholder_from_space, placeholders
+from utils.envs.doom.doom_utils import make_doom_env, doom_env_by_name
+from utils.utils import log, AttrDict, experiments_dir
 
 
 class TestPPO(TestCase):
-    def test_ppo_train_run(self):
+    def ppo_train_run(self, env_name=None):
         test_dir_name = self.__class__.__name__
 
         args, params = parse_args_ppo(AgentPPO.Params)
+        if env_name is not None:
+            args.env = env_name
         params.experiments_root = test_dir_name
         params.num_envs = 16
         params.train_for_steps = 60
         params.initial_save_rate = 20
         params.batch_size = 32
         params.ppo_epochs = 2
-        train(params, args.env)
+        params.use_env_map = False
+        status = train(params, args.env)
+        self.assertEqual(status, TrainStatus.SUCCESS)
 
         root_dir = params.experiment_dir()
         self.assertTrue(os.path.isdir(root_dir))
 
-        enjoy(params, args.env, max_num_episodes=1, fps=1000)
-        shutil.rmtree(root_dir)
+        enjoy(params, args.env, max_num_episodes=1, max_num_frames=50, fps=1000)
+        shutil.rmtree(join(experiments_dir(), params.experiments_root))
 
         self.assertFalse(os.path.isdir(root_dir))
+
+    def test_ppo_train_run(self):
+        self.ppo_train_run()
+
+    def test_ppo_train_run_goal(self):
+        self.ppo_train_run(env_name='doom_maze_goal')
 
     def test_buffer_batches(self):
         obs_size, num_envs, rollout, batch_size = 16, 10, 100, 50
@@ -51,11 +63,10 @@ class TestPPO(TestCase):
         buff.values = np.append(buff.values, np.ones((1, num_envs)), axis=0)
 
         buff.finalize_batch(0.999, 0.99)
-        buff.generate_batches(batch_size, trajectory_len=1)
+        buff.shuffle()
 
-        num_batches = (num_envs * rollout) // batch_size
-        self.assertEqual(buff.obs.shape, (num_batches, batch_size, obs_size))
-        self.assertEqual(buff.rewards.shape, (num_batches, batch_size))
+        self.assertEqual(buff.obs.shape, (rollout * num_envs, obs_size))
+        self.assertEqual(buff.rewards.shape, (rollout * num_envs, ))
 
 
 class TestPPOPerformance(TestCase):
@@ -165,7 +176,8 @@ class TestPPOPerformance(TestCase):
     def test_performance(self):
         params = AgentPPO.Params('test_performance')
         params.ppo_epochs = 2
-        env = make_doom_env(env_by_name(TEST_ENV_NAME))
+        params.rollout = 16
+        env = make_doom_env(doom_env_by_name(TEST_ENV_NAME))
 
         observation_shape = env.observation_space.shape
         experience_size = params.num_envs * params.rollout

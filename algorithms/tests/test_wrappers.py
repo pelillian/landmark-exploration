@@ -6,14 +6,14 @@ from unittest import TestCase
 from gym import spaces
 
 from algorithms.agent import AgentRandom
-from algorithms.algo_utils import EPS
-from algorithms.env_wrappers import NormalizeWrapper, StackFramesWrapper, unwrap_env, ResizeAndGrayscaleWrapper, \
+from algorithms.utils.algo_utils import EPS
+from algorithms.utils.env_wrappers import NormalizeWrapper, StackFramesWrapper, unwrap_env, ResizeWrapper, \
     SkipAndStackFramesWrapper, TimeLimitWrapper, RemainingTimeWrapper
 from algorithms.multi_env import MultiEnv
-from utils.doom.doom_utils import make_doom_env, DOOM_W, DOOM_H, env_by_name
+from utils.envs.doom.doom_utils import make_doom_env, DOOM_W, DOOM_H, doom_env_by_name
 
-TEST_ENV_NAME = 'maze'
-TEST_ENV = env_by_name(TEST_ENV_NAME).env_id
+TEST_ENV_NAME = 'doom_maze'
+TEST_ENV = doom_env_by_name(TEST_ENV_NAME).env_id
 TEST_LOWDIM_ENV = 'CartPole-v0'
 
 
@@ -58,7 +58,7 @@ class TestWrappers(TestCase):
 
     def test_stacked_pixels(self):
         orig_env = gym.make(TEST_ENV)
-        env = ResizeAndGrayscaleWrapper(orig_env, DOOM_W, DOOM_H)
+        env = ResizeWrapper(orig_env, DOOM_W, DOOM_H)
 
         stack = 5
         env = StackFramesWrapper(env, stack)
@@ -66,8 +66,8 @@ class TestWrappers(TestCase):
 
     def test_repeat(self):
         env = gym.make(TEST_ENV)
-        env = ResizeAndGrayscaleWrapper(env, DOOM_W, DOOM_H)
-        env = SkipAndStackFramesWrapper(env, num_frames=4)
+        env = ResizeWrapper(env, DOOM_W, DOOM_H)
+        env = SkipAndStackFramesWrapper(env, skip_frames=4, stack_frames=3)
         env.reset()
         _, _, _, info = env.step(0)
         self.assertEqual(info['num_frames'], 4)
@@ -121,7 +121,7 @@ class TestWrappers(TestCase):
         env.close()
 
     def test_unwrap(self):
-        env = make_doom_env(env_by_name(TEST_ENV_NAME))
+        env = make_doom_env(doom_env_by_name(TEST_ENV_NAME))
         unwrapped = unwrap_env(env)
         self.assertIsNot(type(unwrapped), gym.core.Wrapper)
 
@@ -131,7 +131,7 @@ class TestMultiEnv(TestCase):
 
     @staticmethod
     def make_env_func():
-        env = make_doom_env(env_by_name(TEST_ENV_NAME))
+        env = make_doom_env(doom_env_by_name(TEST_ENV_NAME))
         return env
 
     def test_multi_env(self):
@@ -162,5 +162,8 @@ class TestMultiEnv(TestCase):
             self.assertEqual(len(rewards), num_envs)
             self.assertEqual(len(dones), num_envs)
             self.assertEqual(len(infos), num_envs)
+
+        obs, rewards, dones, infos = multi_env.step([0] * num_envs, reset=[True] * num_envs)
+        self.assertTrue(all(d for d in dones))
 
         multi_env.close()

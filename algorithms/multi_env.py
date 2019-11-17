@@ -7,7 +7,7 @@ from queue import Queue, Empty
 
 import numpy as np
 
-from algorithms.algo_utils import list_to_string
+from algorithms.utils.algo_utils import list_to_string
 from utils.utils import log, AttrDict
 
 
@@ -21,7 +21,7 @@ def safe_get(q, timeout=1e6, msg='Queue timeout'):
 
 
 class MsgType(Enum):
-    TERMINATE, RESET, STEP_REAL, STEP_IMAGINED = range(4)
+    INIT, TERMINATE, RESET, STEP_REAL, STEP_REAL_RESET, STEP_IMAGINED, INFO = range(7)
 
 
 class _MultiEnvWorker:
@@ -44,36 +44,62 @@ class _MultiEnvWorker:
 
         self.process.start()
 
-    def start(self):
-        real_envs = []
-        imagined_envs = None
-
+    def _init(self, envs):
         log.info('Initializing envs %s...', list_to_string(self.env_indices))
         for i in self.env_indices:
             env = self.make_env_func()
             env.seed(i)
-            real_envs.append(env)
+            env.reset()
+            envs.append(env)
+            time.sleep(0.01)
+
+    def _terminate(self, real_envs, imagined_envs):
+        if self._verbose:
+            log.info('Stop worker %s...', list_to_string(self.env_indices))
+        for e in real_envs:
+            e.close()
+        if imagined_envs is not None:
+            for imagined_env in imagined_envs:
+                imagined_env.close()
+
+        if self._verbose:
+            log.info('Worker %s terminated!', list_to_string(self.env_indices))
+
+    @staticmethod
+    def _get_info(env):
+        info = {}
+        if hasattr(env.unwrapped, 'get_info_all'):
+            info = env.unwrapped.get_info_all()  # info for the new episode
+        return info
+
+    def start(self):
+        real_envs = []
+        imagined_envs = None
 
         timing = AttrDict({'copying': 0, 'prediction': 0})
 
         while True:
             actions, msg_type = safe_get(self.task_queue)
-            if msg_type == MsgType.TERMINATE:
-                for e in real_envs:
-                    e.close()
-                if imagined_envs is not None:
-                    for imagined_env in imagined_envs:
-                        imagined_env.close()
+
+            if msg_type == MsgType.INIT:
+                self._init(real_envs)
                 self.task_queue.task_done()
-                log.info('Stop worker %s...', list_to_string(self.env_indices))
+                continue
+
+            if msg_type == MsgType.TERMINATE:
+                self._terminate(real_envs, imagined_envs)
+                self.task_queue.task_done()
                 break
 
+            # handling actual workload
             envs = real_envs
-            if msg_type == MsgType.RESET or msg_type == MsgType.STEP_REAL:
+            if msg_type == MsgType.RESET or msg_type == MsgType.STEP_REAL or msg_type == MsgType.STEP_REAL_RESET:
                 if imagined_envs is not None:
                     for imagined_env in imagined_envs:
                         imagined_env.close()
                 imagined_envs = None
+            elif msg_type == MsgType.INFO:
+                pass
             else:
 
                 if imagined_envs is None:
@@ -101,10 +127,16 @@ class _MultiEnvWorker:
 
             if msg_type == MsgType.RESET:
                 results = [env.reset() for env in envs]
+            elif msg_type == MsgType.INFO:
+                results = [self._get_info(env) for env in envs]
             else:
                 assert len(envs) == len(actions)
 
-                # Collect obs, reward, and 'done' for each env (discard info)
+                reset = [False] * len(actions)
+                if msg_type == MsgType.STEP_REAL_RESET:
+                    actions, reset = zip(*actions)
+
+                # Collect obs, reward, done, and info
                 prediction_start = time.time()
                 results = [env.step(action) for env, action in zip(envs, actions)]
 
@@ -115,11 +147,16 @@ class _MultiEnvWorker:
                     timing.prediction += time.time() - prediction_start
 
                 # If this is a real step and the env is done, reset
-                if msg_type == MsgType.STEP_REAL:
+                if msg_type == MsgType.STEP_REAL or msg_type == MsgType.STEP_REAL_RESET:
                     for i, result in enumerate(results):
                         obs, reward, done, info = result[0]
-                        if done:
+                        if done or reset[i]:
                             obs = real_envs[i].reset()
+                            prev_info = info
+                            info = self._get_info(real_envs[i])  # info for the new episode
+                            info['prev'] = prev_info  # info for the previous episode last frame
+                            done = True
+
                         results[i] = (obs, reward, done, info)  # collapse dimension of size 1
 
             self.result_queue.put(results)
@@ -135,6 +172,13 @@ class MultiEnv:
         if num_workers > num_envs or num_envs % num_workers != 0:
             raise Exception('num_envs should be a multiple of num_workers')
 
+        # create a temp env to query information
+        env = make_env_func()
+        self.action_space = env.action_space
+        self.observation_space = env.observation_space
+        env.close()
+        del env
+
         self.num_envs = num_envs
         self.num_workers = num_workers
         self.workers = []
@@ -145,12 +189,12 @@ class MultiEnv:
             for i in range(num_workers)
         ]
 
-        # create a temp env to query information
-        env = make_env_func()
-        self.action_space = env.action_space
-        self.observation_space = env.observation_space
-        env.close()
-        del env
+        for worker in self.workers:
+            worker.task_queue.put((None, MsgType.INIT))
+            time.sleep(0.1)  # just in case
+        for worker in self.workers:
+            worker.task_queue.join()
+        log.info('Envs initialized!')
 
         self.curr_episode_reward = [0] * num_envs
         self.episode_rewards = [[] for _ in range(num_envs)]
@@ -160,7 +204,7 @@ class MultiEnv:
 
         self.stats_episodes = stats_episodes
 
-    def await_tasks(self, data, task_type, timeout=0.05):
+    def await_tasks(self, data, task_type, timeout=None):
         if data is None:
             data = [None] * self.num_envs
 
@@ -170,6 +214,10 @@ class MultiEnv:
 
         for worker, task in zip(self.workers, data):
             worker.task_queue.put((task, task_type))
+
+        num_envs_per_worker = self.num_envs // self.num_workers
+        if timeout is None:
+            timeout = num_envs_per_worker * 0.02
 
         results = []
         for worker in self.workers:
@@ -186,16 +234,23 @@ class MultiEnv:
 
         return results
 
+    def info(self):
+        infos = self.await_tasks(None, MsgType.INFO)
+        return infos
+
     def reset(self):
         observations = self.await_tasks(None, MsgType.RESET)
         return observations
 
-    def step(self, actions):
+    def step(self, actions, reset=None):
         """
         Obviously, returns vectors of obs, rewards, dones instead of usual single values.
         Must call reset before the first step!
         """
-        results = self.await_tasks(actions, MsgType.STEP_REAL)
+        if reset is None:
+            results = self.await_tasks(actions, MsgType.STEP_REAL)
+        else:
+            results = self.await_tasks(list(zip(actions, reset)), MsgType.STEP_REAL_RESET)
         observations, rewards, dones, infos = zip(*results)
 
         for i in range(self.num_envs):
@@ -247,8 +302,11 @@ class MultiEnv:
 
     def close(self):
         log.info('Stopping multi env...')
-        for i, worker in enumerate(self.workers):
-            worker.task_queue.put((None, MsgType.TERMINATE))  # terminate
+
+        for worker in self.workers:
+            worker.task_queue.put((None, MsgType.TERMINATE))
+            time.sleep(0.1)
+        for worker in self.workers:
             worker.process.join()
 
     def _update_episode_stats(self, episode_stats, curr_episode_data):
@@ -283,5 +341,5 @@ class MultiEnv:
         return self._calc_episode_stats(self.episode_lengths, n)
 
     def stats_num_episodes(self):
-        worker_lenghts = [len(r) for r in self.episode_rewards]
-        return sum(worker_lenghts)
+        worker_lengths = [len(r) for r in self.episode_rewards]
+        return sum(worker_lengths)

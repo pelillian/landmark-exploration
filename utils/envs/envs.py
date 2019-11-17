@@ -1,20 +1,14 @@
-import gym
-
-from algorithms.env_wrappers import RewardScalingWrapper, TimeLimitWrapper, SkipAndStackFramesWrapper, \
-    RemainingTimeWrapper
-from utils.doom.doom_utils import make_doom_env, env_by_name
-
-
 def create_env(env, **kwargs):
+    """Expected names are: doom_maze, atari_montezuma, etc."""
+
     if env.startswith('doom_'):
-        mode = '_'.join(env.split('_')[1:])
-        return make_doom_env(env_by_name(mode), **kwargs)
-    elif env.startswith('car'):
-        env = gym.make('MountainCar-v0').unwrapped
-        env = TimeLimitWrapper(env, limit=200, random_variation_steps=1)
-        env = SkipAndStackFramesWrapper(env, num_frames=3)
-        env = RewardScalingWrapper(env, 0.1)
-        env = RemainingTimeWrapper(env)
-        return env
+        from utils.envs.doom.doom_utils import make_doom_env, doom_env_by_name
+        return make_doom_env(doom_env_by_name(env), **kwargs)
+    elif env.startswith('atari_'):
+        from utils.envs.atari.atari_utils import make_atari_env, atari_env_by_name
+        return make_atari_env(atari_env_by_name(env), **kwargs)
+    elif env.startswith('dmlab_'):
+        from utils.envs.dmlab.dmlab_utils import make_dmlab_env, dmlab_env_by_name
+        return make_dmlab_env(dmlab_env_by_name(env), **kwargs)
     else:
         raise Exception('Unsupported env {0}'.format(env))

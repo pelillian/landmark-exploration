@@ -1,16 +1,12 @@
-""" Utilities """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Utilities."""
 
 import logging
-import math
+import operator
 import os
 from os.path import join
 
 import numpy as np
-import tensorflow as tf
+import psutil
 from colorlog import ColoredFormatter
 
 ch = logging.StreamHandler()
@@ -33,69 +29,57 @@ formatter = ColoredFormatter(
 )
 ch.setFormatter(formatter)
 
-log = logging.getLogger('attcap')
+log = logging.getLogger('rl')
 log.setLevel(logging.DEBUG)
 log.handlers = []  # No duplicated handlers
 log.propagate = False  # workaround for duplicated logs in ipython
 log.addHandler(ch)
 
 
-def put_kernels_on_grid(kernel, pad=1):
-    """
-    Visualize conv. filters as an image (mostly for the 1st layer).
-    Arranges filters into a grid, with some paddings between adjacent filters.
+# general utilities
 
-    Courtesy of: https://gist.github.com/kukuruza/03731dc494603ceab0c5
+class AttrDict(dict):
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
 
-    :param kernel: tensor of shape [Y, X, NumChannels, NumKernels]
-    :param pad: number of black pixels around each filter (between them)
-    :return: Tensor of shape [1, (Y+2*pad)*grid_Y, (X+2*pad)*grid_X, NumChannels].
-    """
+    def __init__(self, d=None):
+        super(AttrDict, self).__init__()
+        if d is not None:
+            for key, value in d.items():
+                self[key] = value
 
-    # get shape of the grid. NumKernels == grid_Y * grid_X
-    def factorization(n):
-        for i in range(int(math.sqrt(float(n))), 0, -1):
-            if n % i == 0:
-                if i == 1:
-                    log.warning('Who would enter a prime number of filters?')
-                return i, int(n / i)
 
-    (grid_Y, grid_X) = factorization(kernel.get_shape()[3].value)
-    log.info('grid: %d = (%d, %d)' % (kernel.get_shape()[3].value, grid_Y, grid_X))
+def scale_to_range(np_array, min, max):
+    min_arr = np.min(np_array)
+    max_arr = np.max(np_array)
+    ret_array = (np_array - min_arr) / (max_arr - min_arr)  # scale to (0,1)
 
-    x_min = tf.reduce_min(kernel)
-    x_max = tf.reduce_max(kernel)
-    kernel = (kernel - x_min) / (x_max - x_min)
+    ret_array = ret_array * (max - min) + min  # scale to (min, max)
+    return ret_array
 
-    # pad X and Y
-    x = tf.pad(kernel, tf.constant([[pad, pad], [pad, pad], [0, 0], [0, 0]]), mode='CONSTANT')
 
-    # X and Y dimensions, w.r.t. padding
-    height = kernel.get_shape()[0] + 2 * pad
-    width = kernel.get_shape()[1] + 2 * pad
+def op_with_idx(x, op):
+    assert len(x) > 0
 
-    channels = kernel.get_shape()[2]
+    best_idx = 0
+    best_x = x[best_idx]
+    for i, item in enumerate(x):
+        if op(item, best_x):
+            best_x = item
+            best_idx = i
 
-    # put NumKernels to the 1st dimension
-    x = tf.transpose(x, (3, 0, 1, 2))
-    # organize grid on Y axis
-    x = tf.reshape(x, tf.stack([grid_X, height * grid_Y, width, channels]))
+    return best_x, best_idx
 
-    # switch X and Y axes
-    x = tf.transpose(x, (0, 2, 1, 3))
-    # organize grid on X axis
-    x = tf.reshape(x, tf.stack([1, width * grid_X, height * grid_Y, channels]))
 
-    # back to normal order (not combining with the next step for clarity)
-    x = tf.transpose(x, (2, 1, 3, 0))
+def min_with_idx(x):
+    return op_with_idx(x, operator.lt)
 
-    # to tf.image_summary order [batch_size, height, width, channels],
-    #   where in this case batch_size == 1
-    x = tf.transpose(x, (3, 0, 1, 2))
 
-    # scaling to [0, 255] is not necessary for tensorboard
-    return x
+def max_with_idx(x):
+    return op_with_idx(x, operator.gt)
 
+
+# numpy stuff
 
 def numpy_all_the_way(list_of_arrays):
     """Turn a list of numpy arrays into a 2D numpy array."""
@@ -110,15 +94,42 @@ def numpy_flatten(list_of_arrays):
     return np.concatenate(list_of_arrays, axis=0)
 
 
-class AttrDict(dict):
-    __getattr__ = dict.__getitem__
-    __setattr__ = dict.__setitem__
+def ensure_contigious(x):
+    if not x.flags['C_CONTIGUOUS']:
+        x = np.ascontiguousarray(x)
+    return x
 
-    def __init__(self, d=None):
-        if d is not None:
-            for key, value in d.items():
-                self[key] = value
 
+# matplotlib
+
+def figure_to_numpy(figure):
+    """
+    @brief Convert a Matplotlib figure to a 4D numpy array with RGBA channels and return it
+    @param figure a matplotlib figure
+    @return a numpy 3D array of RGBA values
+    """
+    # draw the renderer
+    figure.canvas.draw()
+
+    # Get the RGBA buffer from the figure
+    w, h = figure.canvas.get_width_height()
+    buffer = np.fromstring(figure.canvas.tostring_argb(), dtype=np.uint8)
+    buffer.shape = (w, h, 4)
+
+    # canvas.tostring_argb give pixmap in ARGB mode. Roll the ALPHA channel to have it in RGBA mode
+    buffer = np.roll(buffer, 3, axis=2)
+    return buffer
+
+
+# os-related stuff
+
+def memory_consumption_mb():
+    """Memory consumption of the current process."""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / (1024 * 1024)
+
+
+# working with filesystem
 
 def ensure_dir_exists(path):
     if not os.path.exists(path):
@@ -164,5 +175,10 @@ def data_dir(experiment_dir_):
     return ensure_dir_exists(join(experiment_dir_, '.data'))
 
 
+def vis_dir(experiment_dir_):
+    return ensure_dir_exists(join(experiment_dir_, '.vis'))
+
+
 def get_experiment_name(env_id, name):
     return '{}-{}'.format(env_id, name)
+

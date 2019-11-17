@@ -1,10 +1,13 @@
+import time
 from unittest import TestCase
 
 import numpy as np
 
+from algorithms.utils.algo_utils import EPS
 from utils.decay import LinearDecay
-from utils.doom.doom_utils import make_doom_env, env_by_name
-from utils.utils import numpy_all_the_way, numpy_flatten
+from utils.tensorboard import image_summary
+from utils.timing import Timing
+from utils.utils import numpy_all_the_way, numpy_flatten, max_with_idx, min_with_idx
 
 
 class TestDecay(TestCase):
@@ -46,7 +49,7 @@ class TestDecay(TestCase):
         chk(decay.at(99), 50)
 
 
-class TestUtil(TestCase):
+class TestNumpyUtil(TestCase):
     def test_numpy_all_the_way(self):
         a = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]])
         lst = [np.array([0, 1, 2]), np.array([3, 4, 5]), np.array([6, 7, 8])]
@@ -60,7 +63,32 @@ class TestUtil(TestCase):
         self.assertTrue(np.array_equal(a, flattened))
 
 
-class TestDoom(TestCase):
-    def test_doom_env(self):
-        env = make_doom_env(env_by_name('maze'))
-        self.assertIsNotNone(env)
+class TestTiming(TestCase):
+    def test_simple_timer(self):
+        timing = Timing()
+        with timing.timeit('test'):
+            time.sleep(0.05)
+        self.assertGreater(timing.test, 0.05 - EPS)
+
+
+class TestUtils(TestCase):
+    def test_op_with_idx(self):
+        x = [1, 3, 2, 10, -1, 5, 9]
+        max_x, max_idx = max_with_idx(x)
+        self.assertEqual(max_x, max(x))
+        self.assertEqual(max_idx, 3)
+
+        min_x, min_idx = min_with_idx(x)
+        self.assertEqual(min_x, min(x))
+        self.assertEqual(min_idx, 4)
+
+
+class TestTensorboardUtils(TestCase):
+    def test_img_summary(self):
+        fake_img = np.empty((10, 20, 1), dtype=np.uint8)
+        summary = image_summary(fake_img, 'img_uint8')
+        self.assertIsNotNone(summary)
+
+        fake_img = np.empty((10, 20, 1), dtype=np.float32)
+        summary = image_summary(fake_img, 'img_float32')
+        self.assertIsNotNone(summary)
